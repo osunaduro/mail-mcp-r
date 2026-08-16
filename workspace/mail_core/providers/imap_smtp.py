@@ -129,6 +129,24 @@ def _s(value: bytes | str) -> str:
     return value
 
 
+def _apply_resent_headers(raw: bytes, from_addr: str, to_addrs: list[str]) -> EmailMessage:
+    """Parse a raw RFC822 message and prepend ``Resent-*`` headers.
+
+    Pure function, no I/O: the rest of the message (subject, body,
+    attachments, original headers) is left byte-for-byte as parsed —
+    this is what makes a "raw" forward different from ``forward()``,
+    which reconstructs a new message and loses everything but the text
+    body. See RFC 5322 §3.6.6: ``Resent-*`` headers are the standard way
+    to say "this message was resent unchanged".
+    """
+    msg = message_from_bytes(raw, policy=policy.default)
+    msg["Resent-From"] = from_addr
+    msg["Resent-To"] = ", ".join(to_addrs)
+    msg["Resent-Date"] = formatdate(localtime=True)
+    msg["Resent-Message-ID"] = make_msgid()
+    return msg
+
+
 @register("imap_smtp")
 class ImapSmtpProvider(Provider):
     """Proveedor que combina IMAP para lectura y SMTP para envío."""
@@ -424,7 +442,7 @@ class ImapSmtpProvider(Provider):
 
         return msg
 
-    def _send(self, msg: EmailMessage) -> None:
+    def _send(self, msg: EmailMessage, *, to_addrs: list[str] | None = None) -> None:
         host = _option_str(self._config, "smtp_host")
         port = _option_int(self._config, "smtp_port", DEFAULT_SMTP_PORT)
         username = _option_str(self._config, "username")
@@ -435,12 +453,12 @@ class ImapSmtpProvider(Provider):
                 context = ssl.create_default_context()
                 with smtplib.SMTP_SSL(host, port, timeout=IMAP_TIMEOUT, context=context) as smtp:
                     smtp.login(username, password)
-                    smtp.send_message(msg)
+                    smtp.send_message(msg, from_addr=username if to_addrs else None, to_addrs=to_addrs)
             else:
                 with smtplib.SMTP(host, port, timeout=IMAP_TIMEOUT) as smtp:
                     smtp.starttls(context=ssl.create_default_context())
                     smtp.login(username, password)
-                    smtp.send_message(msg)
+                    smtp.send_message(msg, from_addr=username if to_addrs else None, to_addrs=to_addrs)
         except smtplib.SMTPAuthenticationError as exc:
             raise AuthenticationError("Autenticación fallida contra el servidor de envío.") from exc
         except (OSError, smtplib.SMTPException) as exc:
@@ -506,6 +524,30 @@ class ImapSmtpProvider(Provider):
             text += f"\n\n---------- Mensaje original ----------\n{original.body_text}"
         msg.set_content(text)
         self._send(msg)
+
+    def forward_raw(
+        self,
+        folder_id: str,
+        message_id: str,
+        recipients: list[Recipient],
+    ) -> None:
+        """Reenvía el mensaje sin reconstruirlo: bytes RFC822 originales +
+        headers ``Resent-*`` (ver ``_apply_resent_headers``). A diferencia de
+        ``forward``, conserva adjuntos, cuerpo HTML y headers originales —
+        pensado para archivo de auditoría, no para reenvío conversacional.
+        """
+        def _fetch_raw(imap: imaplib.IMAP4) -> bytes:
+            self._select(imap, folder_id)
+            result, data = imap.uid("FETCH", _b(message_id), "(RFC822)")
+            if result != "OK" or not data or not isinstance(data[0], tuple):
+                raise MessageNotFoundError("No se encontró el mensaje solicitado.")
+            return data[0][1]
+
+        raw = self._with_imap(_fetch_raw)
+        username = _option_str(self._config, "username")
+        to_addrs = [r.email for r in recipients]
+        msg = _apply_resent_headers(raw, username, to_addrs)
+        self._send(msg, to_addrs=to_addrs)
 
     def save_draft(self, draft: Draft) -> None:
         self._send(self._build_email(draft))

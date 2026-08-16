@@ -16,4 +16,4 @@ RUN pip install --no-cache-dir .
 ENV PYTHONUNBUFFERED=1 \
     MAIL_MCP_CONFIG=/data/config/accounts.yaml
 
-CMD ["uvicorn", "mcp_server.http:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["uvicorn", "mcp_server.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

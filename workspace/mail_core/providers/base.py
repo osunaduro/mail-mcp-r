@@ -89,6 +89,14 @@ class Provider(ABC):
     ) -> None: ...
 
     @abstractmethod
+    def forward_raw(
+        self,
+        folder_id: str,
+        message_id: str,
+        recipients: list[Recipient],
+    ) -> None: ...
+
+    @abstractmethod
     def save_draft(self, draft: Draft) -> None: ...
 
     @abstractmethod

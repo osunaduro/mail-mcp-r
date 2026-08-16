@@ -181,6 +181,16 @@ class MailService:
         rec_list = [Recipient(email=r) for r in recipients]
         self._provider_for(alias).forward(folder_id, message_id, rec_list, body_text)
 
+    def forward_raw(
+        self,
+        alias: str,
+        folder_id: str,
+        message_id: str,
+        recipients: list[str],
+    ) -> None:
+        rec_list = [Recipient(email=r) for r in recipients]
+        self._provider_for(alias).forward_raw(folder_id, message_id, rec_list)
+
     def save_draft(
         self,
         alias: str,

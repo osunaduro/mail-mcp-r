@@ -13,16 +13,12 @@ directamente a la configuración.
 from __future__ import annotations
 
 import base64
-import os
 from typing import Any, Callable
 
 from fastmcp import FastMCP
 
-from mail_core import MailCoreError, MailService
-
-DEFAULT_CONFIG_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "home", "config", "accounts.yaml"
-)
+from mail_core import MailCoreError
+from mcp_server.service import get_service as _get_service
 
 READ_SCOPE = "mail:read"
 WRITE_SCOPE = "mail:write"
@@ -34,16 +30,6 @@ INSTRUCTIONS = (
     "envío y adjuntos. No permite crear cuentas, cambiar credenciales ni administrar "
     "proveedores — eso es responsabilidad exclusiva del administrador del sistema."
 )
-
-_service: MailService | None = None
-
-
-def _get_service() -> MailService:
-    global _service
-    if _service is None:
-        config_path = os.environ.get("MAIL_MCP_CONFIG", DEFAULT_CONFIG_PATH)
-        _service = MailService(config_path)
-    return _service
 
 
 def _ok(result: Any) -> dict[str, Any]:
@@ -275,6 +261,23 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
         """Reenvía un mensaje a uno o más destinatarios (direcciones de email)."""
         try:
             _get_service().forward(alias, folder_id, message_id, recipients, body_text)
+            return _ok(None)
+        except MailCoreError as exc:
+            return _err(exc)
+
+    @mcp.tool
+    @scoped(WRITE_SCOPE)
+    def forward_message_raw(
+        alias: str, folder_id: str, message_id: str, recipients: list[str]
+    ) -> dict[str, Any]:
+        """Reenvía un mensaje sin reconstruirlo: bytes RFC822 originales con
+        headers Resent-* agregados (RFC 5322). A diferencia de
+        forward_message, conserva adjuntos, cuerpo HTML y headers
+        originales intactos — pensado para archivar/auditar un correo tal
+        cual, no para reenvío conversacional con comentario propio.
+        """
+        try:
+            _get_service().forward_raw(alias, folder_id, message_id, recipients)
             return _ok(None)
         except MailCoreError as exc:
             return _err(exc)

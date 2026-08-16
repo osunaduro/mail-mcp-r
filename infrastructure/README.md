@@ -45,6 +45,19 @@ MEKA_AUTH_MODE=api-key
 MEKA_API_KEY=un-token-largo-y-secreto   # generar con ./generate-api-key.sh
 ```
 
+### API REST (`/api/v1/...`)
+
+Además del MCP en `/mcp/`, el mismo contenedor expone una API REST plana en
+`/api/v1/...` para automatizaciones del ecosistema que no hablan MCP (por
+ejemplo `wp-forwarder`). Es independiente del `MEKA_AUTH_MODE` de arriba —
+siempre requiere su propio token:
+
+```dotenv
+MAIL_SERVICE_TOKEN=otro-token-largo-y-secreto   # generar con ./generate-api-key.sh
+```
+
+Ver la tabla completa de rutas en el [`README.md`](../README.md) del proyecto.
+
 ### Levantar el servicio
 
 ```bash
@@ -80,6 +93,8 @@ La imagen corre Uvicorn con `--proxy-headers --forwarded-allow-ips "*"`, así qu
 | `401` en modo `oidc` | Token JWT ausente, expirado, o `issuer`/`audience` no coinciden con el Provider de Authentik. |
 | `403` en modo `oidc` | Token válido pero sin el scope requerido por la herramienta (`mail:read`, `mail:write`, `mail:delete`). |
 | `503` | `MEKA_API_KEY` no llegó al contenedor (modo `api-key`). |
+| `401` en `/api/v1/...` | Token ausente o distinto a `MAIL_SERVICE_TOKEN`. |
+| `503` en `/api/v1/...` | `MAIL_SERVICE_TOKEN` no llegó al contenedor. |
 | El proxy no resuelve el servicio | El contenedor `mail-mcp` y `meka-proxy` deben compartir `meka-network`. |
 | Redirect con esquema `http://` incorrecto | El proxy/túnel no está seteando `X-Forwarded-Proto`; ver el contrato más arriba. |
 | Falla la lectura de `accounts.yaml` | Verificar `MAIL_MCP_CONFIG_PATH` en `.env` y permisos de lectura del archivo en el host. |

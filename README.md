@@ -9,7 +9,8 @@ El núcleo (`mail_core`) es una **biblioteca Python pura**, sin ninguna dependen
 
 ## Características
 
-- 20 herramientas MCP para cuentas, carpetas, mensajes, envío y adjuntos.
+- 21 herramientas MCP para cuentas, carpetas, mensajes, envío y adjuntos.
+- Además del MCP, una **API REST plana** (`/api/v1/...`) con las mismas 21 operaciones, para automatizaciones del ecosistema que no hablan MCP (ver [API REST](#api-rest)).
 - Múltiples cuentas de correo simultáneas, cada una identificada por un alias (nunca por su dirección de correo ni sus credenciales).
 - Autenticación configurable en dos modos: `api-key` y `oidc`.
 - Scopes `mail:read`, `mail:write` y `mail:delete` que controlan las herramientas en modo OIDC.
@@ -22,7 +23,7 @@ El núcleo (`mail_core`) es una **biblioteca Python pura**, sin ninguna dependen
 | Cuentas | `list_accounts`, `get_account` |
 | Carpetas | `list_folders`, `create_folder`, `rename_folder`, `delete_folder` |
 | Mensajes | `list_messages`, `get_message`, `search_messages`, `move_message`, `copy_message`, `delete_message`, `mark_read`, `mark_flagged` |
-| Envío | `send_message`, `reply_message`, `forward_message`, `save_draft` |
+| Envío | `send_message`, `reply_message`, `forward_message`, `forward_message_raw`, `save_draft` |
 | Adjuntos | `list_attachments`, `download_attachment` |
 
 Notas sobre algunas herramientas menos obvias:
@@ -30,7 +31,57 @@ Notas sobre algunas herramientas menos obvias:
 - `list_messages` no trae el cuerpo del mensaje (para no traer contenido pesado en listados); usar `get_message` para leerlo completo.
 - `download_attachment` devuelve el contenido del adjunto codificado en base64.
 - `reply_message`/`forward_message` operan sobre un mensaje existente (`folder_id` + `message_id`), no requieren reconstruir destinatarios ni asunto a mano.
+- `forward_message` reconstruye el mensaje desde cero (nuevo cuerpo, nuevos headers) — pensado para reenvío conversacional con comentario propio. `forward_message_raw` en cambio reenvía los bytes RFC822 **originales** sin tocarlos, con headers `Resent-*` (RFC 5322 §3.6.6) agregados: conserva adjuntos, HTML y headers intactos — pensado para archivar/auditar un correo tal cual (ej. reenviarlo a una cuenta de log antes de borrarlo).
 - Todos los `message_id` son UIDs de IMAP: estables mientras el mensaje siga existiendo en esa carpeta.
+
+## API REST
+
+Además del MCP (pensado para clientes como Claude), el mismo servidor expone las
+21 operaciones de `mail_core` como una **API REST plana** en `/api/v1/...` —
+JSON sobre HTTP, sin protocolo MCP — para que otros servicios del ecosistema
+(automatizaciones, integraciones, scripts) puedan operar sobre las cuentas de
+correo sin hablar MCP.
+
+**Por qué existe, y por qué expone todo:** `mail-mcp-r` es un servicio pensado
+para un ecosistema, no una librería para importar en cada proyecto — si mañana
+cambia el backend de correo (otro proveedor, otra biblioteca), los consumidores
+de esta API no se enteran, porque solo hablan HTTP contra rutas estables. Y en
+vez de un subconjunto curado de operaciones, se exponen las 21: distintas
+automatizaciones futuras (propias o de terceros que se bajen el proyecto) van a
+necesitar subconjuntos distintos, y no hay forma de anticiparlos todos hoy.
+
+Toda ruta requiere `Authorization: Bearer {MAIL_SERVICE_TOKEN}` — un secreto
+propio, independiente de `MEKA_API_KEY`/OIDC del MCP (ver
+[infrastructure/README.md](infrastructure/README.md#api-rest-apiv1)).
+
+| Área | Método | Ruta | Body / Query |
+| --- | --- | --- | --- |
+| Cuentas | `GET` | `/accounts` | — |
+| | `GET` | `/accounts/{alias}` | — |
+| Carpetas | `GET` | `/accounts/{alias}/folders` | — |
+| | `POST` | `/accounts/{alias}/folders` | `{name}` |
+| | `PATCH` | `/accounts/{alias}/folders/{folder_id}` | `{new_name}` |
+| | `DELETE` | `/accounts/{alias}/folders/{folder_id}` | — |
+| Mensajes | `GET` | `/accounts/{alias}/folders/{folder_id}/messages` | `?limit&offset` |
+| | `GET` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}` | — |
+| | `GET` | `/accounts/{alias}/folders/{folder_id}/messages/search` | `?q&limit` |
+| | `POST` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/move` | `{dest_folder_id}` |
+| | `POST` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/copy` | `{dest_folder_id}` |
+| | `DELETE` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}` | — |
+| | `POST` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/read` | `{read: bool = true}` |
+| | `POST` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/flag` | `{flagged: bool = true}` |
+| Envío | `POST` | `/accounts/{alias}/messages/send` | `{to, subject, body_text, body_html, cc, bcc, attachments}` |
+| | `POST` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/reply` | `{body_text, reply_all, include_original}` |
+| | `POST` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/forward` | `{recipients, body_text}` |
+| | `POST` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/forward-raw` | `{recipients}` |
+| | `POST` | `/accounts/{alias}/drafts` | `{recipients, subject, body_text, cc, bcc}` |
+| Adjuntos | `GET` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/attachments` | — |
+| | `GET` | `/accounts/{alias}/folders/{folder_id}/messages/{message_id}/attachments/{attachment_id}` | — |
+
+Diferencias deliberadas respecto al contrato MCP:
+
+- Errores como status HTTP + `{"error": "..."}` (404 cuenta/carpeta/mensaje/adjunto no encontrado, 502 fallas del proveedor de correo, 500 error de configuración o interno, 400 el resto), en vez del envelope `{"ok": ..., "result": ...}` del MCP.
+- `GET .../attachments/{attachment_id}` devuelve el **binario crudo** del adjunto (`Content-Type` real + `Content-Disposition: attachment`), no JSON+base64 — más idiomático para un consumidor HTTP que va a guardar el archivo directo.
 
 ## Uso local con STDIO
 
@@ -144,7 +195,8 @@ El único `provider` implementado hoy es `imap_smtp`. Si la cuenta tiene 2FA act
 ```text
 workspace/
   mail_core/          Biblioteca pura: cuentas, dominio, providers (IMAP/SMTP), errores — sin transporte
-  mcp_server/          tools.py (herramientas compartidas), stdio.py (STDIO), http.py (HTTP/OAuth), config.py
+  mcp_server/          tools.py (herramientas MCP), rest_api.py (API REST), service.py/auth.py (compartido),
+                        stdio.py (STDIO), http.py (HTTP/OAuth), app.py (combina MCP+REST), config.py
 infrastructure/
   remote/              Docker Compose para exponer el servidor a internet (detrás de tu propio proxy/túnel)
 home/

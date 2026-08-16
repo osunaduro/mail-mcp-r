@@ -20,6 +20,7 @@ services:
       MEKA_OIDC_AUDIENCE: ${MEKA_OIDC_AUDIENCE:-}
       MEKA_OIDC_JWKS_URL: ${MEKA_OIDC_JWKS_URL:-}
       MEKA_OIDC_RESOURCE_URL: ${MEKA_OIDC_RESOURCE_URL:-}
+      MAIL_SERVICE_TOKEN: ${MAIL_SERVICE_TOKEN:-}
 
     volumes:
       - ${MAIL_MCP_CONFIG_PATH:?MAIL_MCP_CONFIG_PATH must point to the host accounts.yaml}:/data/config/accounts.yaml:ro

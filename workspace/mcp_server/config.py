@@ -16,3 +16,8 @@ MEKA_OIDC_ISSUER = os.environ.get("MEKA_OIDC_ISSUER", "")
 MEKA_OIDC_AUDIENCE = os.environ.get("MEKA_OIDC_AUDIENCE", "")
 MEKA_OIDC_JWKS_URL = os.environ.get("MEKA_OIDC_JWKS_URL", "")
 MEKA_OIDC_RESOURCE_URL = os.environ.get("MEKA_OIDC_RESOURCE_URL", "")
+
+# Token de servicio para la API REST plana (workspace/mcp_server/rest_api.py).
+# Independiente del modo de auth del MCP: siempre requerido para esa API,
+# sin importar si MEKA_AUTH_MODE es api-key u oidc.
+MAIL_SERVICE_TOKEN = os.environ.get("MAIL_SERVICE_TOKEN", "")

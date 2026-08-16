@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 from functools import wraps
 from urllib.parse import urlsplit, urlunsplit
 
@@ -12,10 +11,8 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_access_token
 from mcp.server.auth.routes import create_protected_resource_routes
 from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
 
+from mcp_server.auth import BearerTokenMiddleware
 from mcp_server.config import (
     AUTH_MODE,
     MEKA_API_KEY,
@@ -27,23 +24,6 @@ from mcp_server.config import (
 from mcp_server.tools import INSTRUCTIONS, SUPPORTED_SCOPES, register_tools
 
 __all__ = ["app", "mcp"]
-
-
-class BearerTokenMiddleware(BaseHTTPMiddleware):
-    """Rechaza toda solicitud que no traiga el bearer token configurado."""
-
-    async def dispatch(self, request: Request, call_next) -> Response:
-        configured_token = MEKA_API_KEY
-        if not configured_token:
-            return JSONResponse(
-                {"error": "Server authentication is not configured."}, status_code=503
-            )
-        scheme, _, supplied_token = request.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not secrets.compare_digest(
-            supplied_token, configured_token
-        ):
-            return JSONResponse({"error": "Unauthorized."}, status_code=401)
-        return await call_next(request)
 
 
 class OIDCResourceServer(RemoteAuthProvider):
@@ -120,5 +100,7 @@ mcp = FastMCP("mail-mcp", instructions=INSTRUCTIONS, auth=mcp_auth)
 
 register_tools(mcp, scope_guard=_scope if AUTH_MODE == "oidc" else None)
 
-http_middleware = [Middleware(BearerTokenMiddleware)] if AUTH_MODE == "api-key" else []
+http_middleware = (
+    [Middleware(BearerTokenMiddleware, token=MEKA_API_KEY)] if AUTH_MODE == "api-key" else []
+)
 app = mcp.http_app(path=mcp_path, middleware=http_middleware)
