@@ -1,0 +1,38 @@
+services:
+  mail-mcp:
+    build:
+      context: ../..
+      dockerfile: infrastructure/Dockerfile
+
+    container_name: mail-mcp-${PROJECT_NAME}
+
+    restart: unless-stopped
+    init: true
+    user: "${MEKA_UID:-1000}:${MEKA_GID:-1000}"
+    expose:
+      - "8000"
+
+    environment:
+      MAIL_MCP_CONFIG: /data/config/accounts.yaml
+      MEKA_AUTH_MODE: ${MEKA_AUTH_MODE:-oidc}
+      MEKA_API_KEY: ${MEKA_API_KEY:-}
+      MEKA_OIDC_ISSUER: ${MEKA_OIDC_ISSUER:-}
+      MEKA_OIDC_AUDIENCE: ${MEKA_OIDC_AUDIENCE:-}
+      MEKA_OIDC_JWKS_URL: ${MEKA_OIDC_JWKS_URL:-}
+      MEKA_OIDC_RESOURCE_URL: ${MEKA_OIDC_RESOURCE_URL:-}
+
+    volumes:
+      - ${MAIL_MCP_CONFIG_PATH:?MAIL_MCP_CONFIG_PATH must point to the host accounts.yaml}:/data/config/accounts.yaml:ro
+
+    networks:
+      meka-network:
+        aliases:
+          - mail-mcp
+
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  meka-network:
+    external: true
+    name: meka-network

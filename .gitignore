@@ -1,0 +1,26 @@
+# Runtime secrets (any real .env, at any depth — .env.example is unaffected)
+**/.env
+
+# Real account credentials (accounts.example.yaml stays tracked)
+home/config/accounts.yaml
+
+# OAuth client secrets (never versioned, unlike the redacted setup doc)
+**/oidc-credentials.local.md
+
+# Internal MEKA project-management metadata — not part of the distributed project
+.meka/
+
+# Python build and test artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Editor / OS cruft
+.DS_Store
+.vscode/
+.idea/

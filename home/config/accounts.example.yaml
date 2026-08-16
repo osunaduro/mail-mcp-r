@@ -1,0 +1,18 @@
+# Configuración de cuentas de correo
+# Administrada exclusivamente por el administrador del sistema.
+# La biblioteca es el único componente que lee este archivo.
+
+accounts:
+  personal:
+    name: "Correo personal"
+    email: "tu_correo@example.com"
+    provider: imap_smtp
+    options:
+      imap_host: "imap.example.com"
+      imap_port: 993
+      imap_ssl: true
+      smtp_host: "smtp.example.com"
+      smtp_port: 465
+      smtp_ssl: true
+      username: "tu_correo@example.com"
+      password: "TU_CONTRASEÑA_O_APP_PASSWORD"
