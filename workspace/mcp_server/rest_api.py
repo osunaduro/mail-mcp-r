@@ -18,6 +18,7 @@ binario crudo en vez de JSON+base64.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 import anyio
@@ -42,6 +43,8 @@ from mail_core.errors import AttachmentNotFoundError
 from mcp_server.auth import BearerTokenMiddleware
 from mcp_server.config import MAIL_SERVICE_TOKEN
 from mcp_server.service import get_service
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["app"]
 
@@ -74,6 +77,7 @@ async def _call(fn: Callable[[], Any]) -> JSONResponse:
     except (KeyError, TypeError, ValueError) as exc:
         return JSONResponse({"error": f"Bad request: {exc}"}, status_code=400)
     except Exception:
+        logger.exception("Unhandled error in REST API call.")
         return JSONResponse({"error": "Internal server error."}, status_code=500)
 
     if result is None:
@@ -309,6 +313,7 @@ async def download_attachment(request: Request) -> Response:
     except MailCoreError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception:
+        logger.exception("Unhandled error downloading attachment.")
         return JSONResponse({"error": "Internal server error."}, status_code=500)
 
     data = attachment.get("data") or b""

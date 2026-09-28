@@ -39,6 +39,14 @@ DEFAULT_SMTP_PORT = 465
 IMAP_TIMEOUT = 30
 
 _UID_FETCH_RESPONSE_RE = re.compile(rb"UID (\d+)")
+_LIST_LINE_RE = re.compile(r'^\((?P<flags>[^)]*)\)\s+(?:"(?P<delim>(?:[^"\\]|\\.)*)"|NIL)\s+(?P<name>.+)$')
+
+
+def _unquote_mailbox(name: str) -> str:
+    name = name.strip()
+    if len(name) >= 2 and name[0] == '"' and name[-1] == '"':
+        return name[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return name
 
 
 def _option_str(config: AccountConfig, key: str) -> str:
@@ -272,11 +280,13 @@ class ImapSmtpProvider(Provider):
                 raise ConnectionError("No se pudieron listar las carpetas.")
             folders: list[Folder] = []
             for line in data:
-                text = _s(line)
-                parts = text.split(" ")
-                if len(parts) < 3:
+                if line is None:
                     continue
-                name = parts[2].strip('"')
+                text = _s(line).strip()
+                match = _LIST_LINE_RE.match(text)
+                if not match:
+                    continue
+                name = _unquote_mailbox(match.group("name"))
                 if name:
                     folders.append(Folder(folder_id=name, name=name))
             return folders
@@ -586,9 +596,9 @@ class ImapSmtpProvider(Provider):
                 if filename is None:
                     continue
                 payload = part.get_payload(decode=True) or b""
-                if self._attachment_id(part) == attachment_id:
+                if self._attachment_id(part) == attachment.attachment_id:
                     return Attachment(
-                        attachment_id=attachment_id,
+                        attachment_id=attachment.attachment_id,
                         filename=attachment.filename,
                         content_type=part.get_content_type(),
                         size=len(payload),

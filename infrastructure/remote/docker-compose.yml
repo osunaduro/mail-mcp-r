@@ -1,3 +1,5 @@
+name: mail-mcp
+
 services:
   mail-mcp:
     build:
