@@ -12,17 +12,22 @@ nunca llega a correr el parsing MIME ni los comandos IMAP reales.
 
 from __future__ import annotations
 
+from email import message_from_bytes, policy
 from email.message import EmailMessage
 
 import pytest
 
 from mail_core.config.config import AccountConfig
+from mail_core.domain import Draft, Recipient
 from mail_core.errors import FolderNotFoundError, MessageNotFoundError
 from mail_core.providers import imap_smtp
 
 
 def _decode(value: bytes | str) -> str:
-    return value.decode() if isinstance(value, bytes) else value
+    text = value.decode() if isinstance(value, bytes) else value
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return text
 
 
 def _build_raw_message(
@@ -45,10 +50,16 @@ def _build_raw_message(
 class FakeIMAP4:
     """Doble mínimo de ``imaplib.IMAP4`` — solo lo que el provider usa."""
 
-    def __init__(self, folders: dict[str, dict[int, bytes]]):
+    def __init__(
+        self,
+        folders: dict[str, dict[int, bytes]],
+        special_use: dict[str, str] | None = None,
+    ):
         self.folders = folders
+        self.special_use = special_use or {}
         self.selected: str | None = None
         self._pending_delete: set[int] = set()
+        self.appended: list[tuple[str, str, bytes]] = []
 
     def logout(self):
         return "BYE", [b"logout"]
@@ -62,8 +73,22 @@ class FakeIMAP4:
         return "OK", [str(len(self.folders[name])).encode()]
 
     def list(self):
-        lines = [f'(\\HasNoChildren) "/" "{name}"'.encode() for name in self.folders]
+        lines = [
+            f'(\\HasNoChildren{" " + self.special_use[name] if name in self.special_use else ""})'
+            f' "/" "{name}"'.encode()
+            for name in self.folders
+        ]
         return "OK", lines
+
+    def append(self, mailbox, flags, _date_time, message):
+        name = _decode(mailbox)
+        if name not in self.folders:
+            return "NO", [b"[TRYCREATE] no such mailbox"]
+        box = self.folders[name]
+        uid = max(box, default=0) + 1
+        box[uid] = message
+        self.appended.append((name, flags, message))
+        return "OK", [f"[APPENDUID 1 {uid}] APPEND completed".encode()]
 
     def create(self, mailbox):
         self.folders.setdefault(_decode(mailbox), {})
@@ -228,3 +253,162 @@ def test_move_message_pasa_el_mensaje_a_la_carpeta_destino(provider, fake_imap):
 
     assert 1 not in fake_imap.folders["INBOX"]
     assert 1 in fake_imap.folders["Procesados"]
+
+
+# ----------------------------------------------------------------------
+# Borradores y copia en Enviados
+# ----------------------------------------------------------------------
+
+
+class FakeSMTP:
+    """Registra lo que se habría enviado por SMTP."""
+
+    def __init__(self, monkeypatch, provider):
+        self.sent: list = []
+        monkeypatch.setattr(
+            provider, "_send", lambda msg, to_addrs=None: self.sent.append(msg)
+        )
+
+
+def _provider_with(fake_imap, **options):
+    config = AccountConfig(
+        alias="test",
+        name="Test",
+        provider="imap_smtp",
+        email="test@example.com",
+        options={"username": "test@example.com", "password": "x", **options},
+    )
+    return imap_smtp.ImapSmtpProvider(config)
+
+
+def test_save_draft_no_envia_y_guarda_en_borradores(provider, fake_imap, monkeypatch):
+    """Regresión: save_draft enviaba el correo por SMTP en vez de guardarlo."""
+    fake_imap.folders["Borradores"] = {}
+    fake_imap.special_use["Borradores"] = "\\Drafts"
+    smtp = FakeSMTP(monkeypatch, provider)
+
+    result = provider.save_draft(
+        Draft(recipients=[Recipient(email="cliente@example.com")], subject="Presupuesto", body_text="Hola")
+    )
+
+    assert smtp.sent == []
+    assert result.folder_id == "Borradores"
+    assert result.message_id == "1"
+    assert result.sent is False
+    name, flags, raw = fake_imap.appended[0]
+    assert name == "Borradores"
+    assert "\\Draft" in flags
+    assert b"Subject: Presupuesto" in raw
+
+
+def test_save_draft_sin_special_use_usa_nombre_habitual(provider, fake_imap, monkeypatch):
+    fake_imap.folders["INBOX.Drafts"] = {}
+    FakeSMTP(monkeypatch, provider)
+
+    result = provider.save_draft(Draft(recipients=[Recipient(email="a@example.com")]))
+
+    assert result.folder_id == "INBOX.Drafts"
+
+
+def test_save_draft_crea_la_carpeta_si_no_existe(provider, fake_imap, monkeypatch):
+    FakeSMTP(monkeypatch, provider)
+
+    result = provider.save_draft(Draft(recipients=[Recipient(email="a@example.com")]))
+
+    assert result.folder_id == "Drafts"
+    assert 1 in fake_imap.folders["Drafts"]
+
+
+def test_save_reply_draft_no_envia_y_encadena_con_el_original(provider, fake_imap, monkeypatch):
+    original = EmailMessage()
+    original["From"] = "cliente@example.com"
+    original["To"] = "test@example.com"
+    original["Subject"] = "Consulta"
+    original["Message-ID"] = "<orig-123@example.com>"
+    original.set_content("¿Tienen precio?")
+    fake_imap.folders["INBOX"][7] = original.as_bytes()
+    fake_imap.folders["Drafts"] = {}
+    smtp = FakeSMTP(monkeypatch, provider)
+
+    result = provider.save_reply_draft("INBOX", "7", "Sí, te paso el precio.")
+
+    assert smtp.sent == []
+    assert result.folder_id == "Drafts"
+    draft = message_from_bytes(fake_imap.folders["Drafts"][1], policy=policy.default)
+    assert draft["To"] == "cliente@example.com"
+    assert draft["Subject"] == "Re: Consulta"
+    assert draft["In-Reply-To"] == "<orig-123@example.com>"
+    assert "<orig-123@example.com>" in draft["References"]
+
+
+def test_send_guarda_copia_en_enviados(provider, fake_imap, monkeypatch):
+    """Regresión: el envío no dejaba ninguna copia en Enviados."""
+    fake_imap.folders["Sent Items"] = {}
+    smtp = FakeSMTP(monkeypatch, provider)
+
+    result = provider.send(
+        Draft(recipients=[Recipient(email="a@example.com")], subject="Hola", body_text="x")
+    )
+
+    assert len(smtp.sent) == 1
+    assert result.sent is True
+    assert result.saved_to_sent is True
+    assert result.sent_folder_id == "Sent Items"
+    name, flags, _ = fake_imap.appended[0]
+    assert name == "Sent Items"
+    assert "\\Seen" in flags
+
+
+def test_reply_envia_y_guarda_copia_en_enviados(provider, fake_imap, monkeypatch):
+    fake_imap.folders["INBOX"][1] = _build_raw_message("Consulta")
+    fake_imap.folders["Enviados"] = {}
+    smtp = FakeSMTP(monkeypatch, provider)
+
+    result = provider.reply("INBOX", "1", "Respuesta")
+
+    assert len(smtp.sent) == 1
+    assert result.saved_to_sent is True
+    assert result.sent_folder_id == "Enviados"
+
+
+def test_gmail_no_duplica_la_copia_en_enviados(fake_imap, monkeypatch):
+    provider = _provider_with(fake_imap, smtp_host="smtp.gmail.com")
+    fake_imap.folders["[Gmail]/Sent Mail"] = {}
+    FakeSMTP(monkeypatch, provider)
+
+    result = provider.send(Draft(recipients=[Recipient(email="a@example.com")]))
+
+    assert result.sent is True
+    assert result.saved_to_sent is False
+    assert fake_imap.appended == []
+
+
+def test_save_sent_y_sent_folder_configurables(fake_imap, monkeypatch):
+    provider = _provider_with(
+        fake_imap, smtp_host="smtp.gmail.com", save_sent=True, sent_folder="Procesados"
+    )
+    FakeSMTP(monkeypatch, provider)
+
+    result = provider.send(Draft(recipients=[Recipient(email="a@example.com")]))
+
+    assert result.saved_to_sent is True
+    assert result.sent_folder_id == "Procesados"
+
+
+def test_fallo_al_guardar_copia_no_anula_el_envio(provider, fake_imap, monkeypatch):
+    fake_imap.folders["Sent"] = {}
+    monkeypatch.setattr(fake_imap, "append", lambda *a: ("NO", [b"quota exceeded"]))
+    smtp = FakeSMTP(monkeypatch, provider)
+
+    result = provider.send(Draft(recipients=[Recipient(email="a@example.com")]))
+
+    assert len(smtp.sent) == 1
+    assert result.sent is True
+    assert result.saved_to_sent is False
+    assert result.warning
+
+
+def test_nombres_de_carpeta_con_espacios_se_entrecomillan():
+    assert imap_smtp._mb("INBOX") == b"INBOX"
+    assert imap_smtp._mb("Sent Items") == b'"Sent Items"'
+    assert imap_smtp._mb('a"b') == b'"a\\"b"'

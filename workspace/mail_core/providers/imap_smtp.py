@@ -13,6 +13,7 @@ import imaplib
 import re
 import smtplib
 import ssl
+import time
 from email import policy
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, getaddresses, make_msgid
@@ -22,7 +23,16 @@ from datetime import datetime
 from hashlib import md5
 
 from mail_core.config.config import AccountConfig
-from mail_core.domain import Account, Attachment, Draft, Folder, Message, Recipient
+from mail_core.domain import (
+    Account,
+    Attachment,
+    Draft,
+    Folder,
+    Message,
+    Recipient,
+    SavedDraft,
+    SendResult,
+)
 from mail_core.errors import (
     AccountNotFoundError,
     AuthenticationError,
@@ -40,6 +50,29 @@ IMAP_TIMEOUT = 30
 
 _UID_FETCH_RESPONSE_RE = re.compile(rb"UID (\d+)")
 _LIST_LINE_RE = re.compile(r'^\((?P<flags>[^)]*)\)\s+(?:"(?P<delim>(?:[^"\\]|\\.)*)"|NIL)\s+(?P<name>.+)$')
+_APPENDUID_RE = re.compile(rb"APPENDUID \d+ (\d+)")
+
+# Carpetas especiales: atributo SPECIAL-USE (RFC 6154) y, si el servidor no
+# lo anuncia, nombres habituales. ``drafts_folder``/``sent_folder`` en las
+# opciones de la cuenta tienen prioridad sobre ambos.
+_SPECIAL_USE_FLAGS = {"drafts": "\\drafts", "sent": "\\sent"}
+_SPECIAL_FALLBACK_NAMES = {
+    "drafts": [
+        "Drafts", "INBOX.Drafts", "INBOX/Drafts", "Borradores", "INBOX.Borradores",
+        "INBOX/Borradores", "Draft", "[Gmail]/Drafts", "[Gmail]/Borradores",
+    ],
+    "sent": [
+        "Sent", "INBOX.Sent", "INBOX/Sent", "Sent Items", "Sent Messages", "Sent Mail",
+        "Enviados", "INBOX.Enviados", "INBOX/Enviados", "Elementos enviados",
+        "[Gmail]/Sent Mail", "[Gmail]/Enviados",
+    ],
+}
+_SPECIAL_OPTION = {"drafts": "drafts_folder", "sent": "sent_folder"}
+_SPECIAL_DEFAULT_NAME = {"drafts": "Drafts", "sent": "Sent"}
+
+# Servidores SMTP que ya guardan solos una copia en Enviados: guardarla de
+# nuevo por IMAP la duplicaría. ``save_sent`` en las opciones lo fuerza.
+_AUTO_SENT_SMTP_HOSTS = ("gmail.com", "googlemail.com", "office365.com", "outlook.com")
 
 
 def _unquote_mailbox(name: str) -> str:
@@ -131,6 +164,19 @@ def _b(value: str) -> bytes:
     return value.encode("utf-8")
 
 
+def _mb(name: str) -> bytes:
+    """Nombre de carpeta listo para un comando IMAP.
+
+    ``imaplib`` no entrecomilla los argumentos: un nombre con espacios
+    ("Sent Items", "Elementos enviados") rompería el comando.
+    """
+    if name.startswith('"') and name.endswith('"') and len(name) >= 2:
+        return _b(name)
+    if re.search(r'[\s"\\(){}%*\]]', name) or not name:
+        return _b('"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"')
+    return _b(name)
+
+
 def _s(value: bytes | str) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
@@ -183,7 +229,7 @@ class ImapSmtpProvider(Provider):
                 pass
 
     def _select(self, imap: imaplib.IMAP4, folder_id: str) -> None:
-        result, _ = imap.select(_b(folder_id))
+        result, _ = imap.select(_mb(folder_id))
         if result != "OK":
             raise FolderNotFoundError("No existe la carpeta solicitada.")
 
@@ -225,6 +271,8 @@ class ImapSmtpProvider(Provider):
             message_id=uid,
             folder_id=folder_id,
             subject=_decode_mime(msg.get("Subject")) or "",
+            internet_message_id=(msg.get("Message-ID") or "").strip() or None,
+            references=(msg.get("References") or "").strip() or None,
             sender=sender[0] if sender else None,
             recipients=_parse_addresses(msg.get("To")),
             cc=_parse_addresses(msg.get("Cc")),
@@ -273,29 +321,83 @@ class ImapSmtpProvider(Provider):
     # Carpetas
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _list_mailboxes(imap: imaplib.IMAP4) -> list[tuple[str, str]]:
+        """Devuelve (flags, nombre) de cada carpeta, flags en minúsculas."""
+        result, data = imap.list()
+        if result != "OK":
+            raise ConnectionError("No se pudieron listar las carpetas.")
+        mailboxes: list[tuple[str, str]] = []
+        for line in data:
+            if line is None:
+                continue
+            text = _s(line).strip()
+            match = _LIST_LINE_RE.match(text)
+            if not match:
+                continue
+            name = _unquote_mailbox(match.group("name"))
+            if name:
+                mailboxes.append((match.group("flags").lower(), name))
+        return mailboxes
+
     def list_folders(self) -> list[Folder]:
         def _run(imap: imaplib.IMAP4) -> list[Folder]:
-            result, data = imap.list()
-            if result != "OK":
-                raise ConnectionError("No se pudieron listar las carpetas.")
-            folders: list[Folder] = []
-            for line in data:
-                if line is None:
-                    continue
-                text = _s(line).strip()
-                match = _LIST_LINE_RE.match(text)
-                if not match:
-                    continue
-                name = _unquote_mailbox(match.group("name"))
-                if name:
-                    folders.append(Folder(folder_id=name, name=name))
-            return folders
+            return [
+                Folder(folder_id=name, name=name)
+                for _, name in self._list_mailboxes(imap)
+            ]
 
         return self._with_imap(_run)
 
+    def _special_folder(self, imap: imaplib.IMAP4, kind: str) -> str:
+        """Resuelve la carpeta de borradores (``drafts``) o enviados (``sent``).
+
+        Orden: opción explícita de la cuenta, atributo SPECIAL-USE, nombres
+        habituales. Si no existe ninguna, la crea con el nombre por defecto.
+        """
+        configured = self._config.options.get(_SPECIAL_OPTION[kind])
+        if isinstance(configured, str) and configured:
+            return configured
+
+        mailboxes = self._list_mailboxes(imap)
+        flag = _SPECIAL_USE_FLAGS[kind]
+        for flags, name in mailboxes:
+            if flag in flags.split():
+                return name
+        by_lower = {name.lower(): name for _, name in mailboxes}
+        for candidate in _SPECIAL_FALLBACK_NAMES[kind]:
+            if candidate.lower() in by_lower:
+                return by_lower[candidate.lower()]
+
+        name = _SPECIAL_DEFAULT_NAME[kind]
+        result, _ = imap.create(_mb(name))
+        if result != "OK":
+            raise FolderNotFoundError(
+                f"No se encontró la carpeta de {'borradores' if kind == 'drafts' else 'enviados'}."
+            )
+        return name
+
+    @staticmethod
+    def _append(
+        imap: imaplib.IMAP4, folder_id: str, msg: EmailMessage, flags: str
+    ) -> str | None:
+        """Guarda ``msg`` en ``folder_id`` vía IMAP APPEND; devuelve el UID si
+        el servidor lo informa (UIDPLUS)."""
+        result, data = imap.append(
+            _mb(folder_id), flags, imaplib.Time2Internaldate(time.time()), msg.as_bytes()
+        )
+        if result != "OK":
+            raise ConnectionError("No se pudo guardar el mensaje en la carpeta.")
+        for chunk in data or []:
+            if isinstance(chunk, (bytes, str)):
+                match = _APPENDUID_RE.search(chunk if isinstance(chunk, bytes) else _b(chunk))
+                if match:
+                    return match.group(1).decode("ascii")
+        return None
+
     def create_folder(self, name: str) -> Folder:
         def _run(imap: imaplib.IMAP4) -> Folder:
-            result, _ = imap.create(_b(name))
+            result, _ = imap.create(_mb(name))
             if result != "OK":
                 raise ConnectionError("No se pudo crear la carpeta.")
             return Folder(folder_id=name, name=name)
@@ -304,7 +406,7 @@ class ImapSmtpProvider(Provider):
 
     def rename_folder(self, folder_id: str, new_name: str) -> Folder:
         def _run(imap: imaplib.IMAP4) -> Folder:
-            result, _ = imap.rename(_b(folder_id), _b(new_name))
+            result, _ = imap.rename(_mb(folder_id), _mb(new_name))
             if result != "OK":
                 raise FolderNotFoundError("No se pudo renombrar la carpeta.")
             return Folder(folder_id=new_name, name=new_name)
@@ -313,7 +415,7 @@ class ImapSmtpProvider(Provider):
 
     def delete_folder(self, folder_id: str) -> None:
         def _run(imap: imaplib.IMAP4) -> None:
-            result, _ = imap.delete(_b(folder_id))
+            result, _ = imap.delete(_mb(folder_id))
             if result != "OK":
                 raise FolderNotFoundError("No se pudo eliminar la carpeta.")
 
@@ -368,7 +470,7 @@ class ImapSmtpProvider(Provider):
     ) -> None:
         def _run(imap: imaplib.IMAP4) -> None:
             self._select(imap, folder_id)
-            result, _ = imap.uid("COPY", _b(message_id), _b(dest_folder_id))
+            result, _ = imap.uid("COPY", _b(message_id), _mb(dest_folder_id))
             if result != "OK":
                 raise FolderNotFoundError("No se pudo mover el mensaje a la carpeta destino.")
             imap.uid("STORE", _b(message_id), "+FLAGS", "\\Deleted")
@@ -381,7 +483,7 @@ class ImapSmtpProvider(Provider):
     ) -> None:
         def _run(imap: imaplib.IMAP4) -> None:
             self._select(imap, folder_id)
-            result, _ = imap.uid("COPY", _b(message_id), _b(dest_folder_id))
+            result, _ = imap.uid("COPY", _b(message_id), _mb(dest_folder_id))
             if result != "OK":
                 raise FolderNotFoundError("No se pudo copiar el mensaje a la carpeta destino.")
 
@@ -474,8 +576,103 @@ class ImapSmtpProvider(Provider):
         except (OSError, smtplib.SMTPException) as exc:
             raise SendError("No se pudo enviar el mensaje.") from exc
 
-    def send(self, draft: Draft) -> None:
-        self._send(self._build_email(draft))
+    def _should_save_sent(self) -> bool:
+        configured = self._config.options.get("save_sent")
+        if isinstance(configured, bool):
+            return configured
+        host = str(self._config.options.get("smtp_host") or "").lower()
+        return not any(
+            host == suffix or host.endswith("." + suffix) for suffix in _AUTO_SENT_SMTP_HOSTS
+        )
+
+    def _send_and_store(self, msg: EmailMessage, *, to_addrs: list[str] | None = None) -> SendResult:
+        """Envía por SMTP y guarda una copia en Enviados.
+
+        SMTP solo entrega el mensaje: la copia en Enviados la tiene que
+        guardar el cliente (salvo servidores que lo hacen solos, ver
+        ``_should_save_sent``). Si guardar la copia falla, el envío ya se
+        hizo y no se informa como error, solo como ``warning``.
+        """
+        self._send(msg, to_addrs=to_addrs)
+        if not self._should_save_sent():
+            return SendResult(sent=True, saved_to_sent=False)
+
+        def _run(imap: imaplib.IMAP4) -> SendResult:
+            folder = self._special_folder(imap, "sent")
+            uid = self._append(imap, folder, msg, "(\\Seen)")
+            return SendResult(
+                sent=True, saved_to_sent=True, sent_folder_id=folder, sent_message_id=uid
+            )
+
+        try:
+            return self._with_imap(_run)
+        except Exception:  # el envío ya salió: nunca reportarlo como fallido
+            return SendResult(
+                sent=True,
+                saved_to_sent=False,
+                warning="El mensaje se envió, pero no se pudo guardar la copia en Enviados.",
+            )
+
+    def _save_to_drafts(self, msg: EmailMessage) -> SavedDraft:
+        def _run(imap: imaplib.IMAP4) -> SavedDraft:
+            folder = self._special_folder(imap, "drafts")
+            uid = self._append(imap, folder, msg, "(\\Draft \\Seen)")
+            return SavedDraft(folder_id=folder, message_id=uid)
+
+        return self._with_imap(_run)
+
+    def send(self, draft: Draft) -> SendResult:
+        return self._send_and_store(self._build_email(draft))
+
+    def _build_reply(
+        self,
+        folder_id: str,
+        message_id: str,
+        body_text: str,
+        reply_all: bool,
+        include_original: bool,
+    ) -> EmailMessage:
+        original = self.get_message(folder_id, message_id)
+        if original.sender is None:
+            raise SendError("El mensaje original no tiene remitente.")
+
+        own = {
+            str(self._config.options.get("username") or "").lower(),
+            str(self._config.email or "").lower(),
+        }
+        recipients = [original.sender]
+        cc: list[Recipient] = []
+        if reply_all:
+            seen = {original.sender.email.lower()}
+            for r in original.recipients:
+                if r.email.lower() not in seen and r.email.lower() not in own:
+                    recipients.append(r)
+                    seen.add(r.email.lower())
+            cc = [
+                r for r in original.cc
+                if r.email.lower() not in seen and r.email.lower() not in own
+            ]
+
+        msg = EmailMessage()
+        msg["From"] = _option_str(self._config, "username")
+        msg["To"] = ", ".join(r.email for r in recipients)
+        if cc:
+            msg["Cc"] = ", ".join(r.email for r in cc)
+        subject = original.subject or ""
+        msg["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid()
+        if original.internet_message_id:
+            msg["In-Reply-To"] = original.internet_message_id
+            references = " ".join(
+                part for part in (original.references, original.internet_message_id) if part
+            )
+            msg["References"] = references
+        text = body_text
+        if include_original and original.body_text:
+            text += f"\n\nOn {original.date}, {original.sender.email} wrote:\n{original.body_text}"
+        msg.set_content(text)
+        return msg
 
     def reply(
         self,
@@ -484,33 +681,20 @@ class ImapSmtpProvider(Provider):
         body_text: str,
         reply_all: bool = False,
         include_original: bool = True,
-    ) -> None:
-        original = self.get_message(folder_id, message_id)
-        if original.sender is None:
-            raise SendError("El mensaje original no tiene remitente.")
+    ) -> SendResult:
+        msg = self._build_reply(folder_id, message_id, body_text, reply_all, include_original)
+        return self._send_and_store(msg)
 
-        recipients = [original.sender]
-        cc: list[Recipient] = []
-        if reply_all:
-            recipients.extend(r for r in original.recipients if r != original.sender)
-            cc = list(original.cc)
-
-        msg = EmailMessage()
-        msg["From"] = _option_str(self._config, "username")
-        msg["To"] = ", ".join(r.email for r in recipients)
-        if cc:
-            msg["Cc"] = ", ".join(r.email for r in cc)
-        msg["Subject"] = f"Re: {original.subject}"
-        msg["Date"] = formatdate(localtime=True)
-        msg["Message-ID"] = make_msgid()
-        if original.message_id:
-            msg["References"] = original.message_id
-            msg["In-Reply-To"] = original.message_id
-        text = body_text
-        if include_original and original.body_text:
-            text += f"\n\nOn {original.date}, {original.sender.email} wrote:\n{original.body_text}"
-        msg.set_content(text)
-        self._send(msg)
+    def save_reply_draft(
+        self,
+        folder_id: str,
+        message_id: str,
+        body_text: str,
+        reply_all: bool = False,
+        include_original: bool = True,
+    ) -> SavedDraft:
+        msg = self._build_reply(folder_id, message_id, body_text, reply_all, include_original)
+        return self._save_to_drafts(msg)
 
     def forward(
         self,
@@ -518,7 +702,7 @@ class ImapSmtpProvider(Provider):
         message_id: str,
         recipients: list[Recipient],
         body_text: str,
-    ) -> None:
+    ) -> SendResult:
         original = self.get_message(folder_id, message_id)
 
         msg = EmailMessage()
@@ -527,24 +711,25 @@ class ImapSmtpProvider(Provider):
         msg["Subject"] = f"Fwd: {original.subject}"
         msg["Date"] = formatdate(localtime=True)
         msg["Message-ID"] = make_msgid()
-        if original.message_id:
-            msg["References"] = original.message_id
+        if original.internet_message_id:
+            msg["References"] = original.internet_message_id
         text = body_text
         if original.body_text:
             text += f"\n\n---------- Mensaje original ----------\n{original.body_text}"
         msg.set_content(text)
-        self._send(msg)
+        return self._send_and_store(msg)
 
     def forward_raw(
         self,
         folder_id: str,
         message_id: str,
         recipients: list[Recipient],
-    ) -> None:
+    ) -> SendResult:
         """Reenvía el mensaje sin reconstruirlo: bytes RFC822 originales +
         headers ``Resent-*`` (ver ``_apply_resent_headers``). A diferencia de
         ``forward``, conserva adjuntos, cuerpo HTML y headers originales —
         pensado para archivo de auditoría, no para reenvío conversacional.
+        Por eso no guarda copia en Enviados.
         """
         def _fetch_raw(imap: imaplib.IMAP4) -> bytes:
             self._select(imap, folder_id)
@@ -558,9 +743,11 @@ class ImapSmtpProvider(Provider):
         to_addrs = [r.email for r in recipients]
         msg = _apply_resent_headers(raw, username, to_addrs)
         self._send(msg, to_addrs=to_addrs)
+        return SendResult(sent=True, saved_to_sent=False)
 
-    def save_draft(self, draft: Draft) -> None:
-        self._send(self._build_email(draft))
+    def save_draft(self, draft: Draft) -> SavedDraft:
+        """Guarda el borrador en la carpeta de borradores. NO lo envía."""
+        return self._save_to_drafts(self._build_email(draft))
 
     # ------------------------------------------------------------------
     # Adjuntos

@@ -123,6 +123,10 @@ class FakeMailService:
         self._record("forward_raw", alias, folder_id, message_id, recipients)
         return None
 
+    def save_reply_draft(self, alias, folder_id, message_id, body_text, **kwargs):
+        self._record("save_reply_draft", alias, folder_id, message_id, body_text, **kwargs)
+        return {"folder_id": "Drafts", "message_id": "9", "sent": False}
+
     def save_draft(self, alias, **kwargs):
         self._record("save_draft", alias, **kwargs)
         return None
@@ -340,6 +344,19 @@ def test_reply_message(client, fake):
     assert args == ("work", "INBOX", "42", "Respuesta")
     assert kwargs["reply_all"] is True
     assert kwargs["include_original"] is True
+
+
+def test_save_reply_draft(client, fake):
+    body = {"body_text": "Borrador de respuesta"}
+    r = client.post(
+        "/accounts/work/folders/INBOX/messages/42/reply-draft", headers=AUTH, json=body
+    )
+    assert r.status_code == 200
+    assert r.json() == {"folder_id": "Drafts", "message_id": "9", "sent": False}
+    name, args, kwargs = fake.calls[0]
+    assert name == "save_reply_draft"
+    assert args == ("work", "INBOX", "42", "Borrador de respuesta")
+    assert kwargs["reply_all"] is False
 
 
 def test_forward_message(client, fake):

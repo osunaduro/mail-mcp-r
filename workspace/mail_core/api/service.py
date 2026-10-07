@@ -152,9 +152,10 @@ class MailService:
         cc: list[dict[str, Any]] | None = None,
         bcc: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
+        """Envía el mensaje y guarda una copia en Enviados."""
         draft = _build_draft(to, cc, bcc, subject, body_text, body_html, attachments)
-        self._provider_for(alias).send(draft)
+        return self._provider_for(alias).send(draft).to_dict()
 
     def reply(
         self,
@@ -165,10 +166,26 @@ class MailService:
         *,
         reply_all: bool = False,
         include_original: bool = True,
-    ) -> None:
-        self._provider_for(alias).reply(
+    ) -> dict[str, Any]:
+        """Envía la respuesta y guarda una copia en Enviados."""
+        return self._provider_for(alias).reply(
             folder_id, message_id, body_text, reply_all, include_original
-        )
+        ).to_dict()
+
+    def save_reply_draft(
+        self,
+        alias: str,
+        folder_id: str,
+        message_id: str,
+        body_text: str,
+        *,
+        reply_all: bool = False,
+        include_original: bool = True,
+    ) -> dict[str, Any]:
+        """Arma la respuesta y la deja en Borradores. NO la envía."""
+        return self._provider_for(alias).save_reply_draft(
+            folder_id, message_id, body_text, reply_all, include_original
+        ).to_dict()
 
     def forward(
         self,
@@ -177,9 +194,11 @@ class MailService:
         message_id: str,
         recipients: list[str],
         body_text: str,
-    ) -> None:
+    ) -> dict[str, Any]:
         rec_list = [Recipient(email=r) for r in recipients]
-        self._provider_for(alias).forward(folder_id, message_id, rec_list, body_text)
+        return self._provider_for(alias).forward(
+            folder_id, message_id, rec_list, body_text
+        ).to_dict()
 
     def forward_raw(
         self,
@@ -187,9 +206,9 @@ class MailService:
         folder_id: str,
         message_id: str,
         recipients: list[str],
-    ) -> None:
+    ) -> dict[str, Any]:
         rec_list = [Recipient(email=r) for r in recipients]
-        self._provider_for(alias).forward_raw(folder_id, message_id, rec_list)
+        return self._provider_for(alias).forward_raw(folder_id, message_id, rec_list).to_dict()
 
     def save_draft(
         self,
@@ -201,9 +220,11 @@ class MailService:
         body_html: str | None = None,
         cc: list[dict[str, Any]] | None = None,
         bcc: list[dict[str, Any]] | None = None,
-    ) -> None:
-        draft = _build_draft(recipients, cc, bcc, subject, body_text, body_html)
-        self._provider_for(alias).save_draft(draft)
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Guarda un borrador en la carpeta de borradores. NO lo envía."""
+        draft = _build_draft(recipients, cc, bcc, subject, body_text, body_html, attachments)
+        return self._provider_for(alias).save_draft(draft).to_dict()
 
     # ------------------------------------------------------------------
     # Adjuntos

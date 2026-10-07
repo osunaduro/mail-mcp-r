@@ -56,6 +56,10 @@ class Message:
     message_id: str
     folder_id: str
     subject: str = ""
+    # Header ``Message-ID`` (RFC 5322). Distinto de ``message_id``, que es el
+    # identificador interno (UID); se usa para encadenar respuestas.
+    internet_message_id: str | None = None
+    references: str | None = None
     sender: Recipient | None = None
     recipients: list[Recipient] = field(default_factory=list)
     cc: list[Recipient] = field(default_factory=list)
@@ -73,6 +77,7 @@ class Message:
             "message_id": self.message_id,
             "folder_id": self.folder_id,
             "subject": self.subject,
+            "internet_message_id": self.internet_message_id,
             "sender": self.sender.to_dict() if self.sender else None,
             "recipients": [r.to_dict() for r in self.recipients],
             "cc": [r.to_dict() for r in self.cc],
@@ -144,3 +149,47 @@ class Draft:
     body_text: str | None = None
     body_html: str | None = None
     attachments: list[tuple[str, bytes, str | None]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SendResult:
+    """Resultado de un envío.
+
+    ``saved_to_sent`` indica si se guardó una copia en la carpeta de enviados.
+    Un fallo al guardar la copia no anula el envío (el mensaje ya salió): se
+    informa en ``warning``.
+    """
+
+    sent: bool = True
+    saved_to_sent: bool = False
+    sent_folder_id: str | None = None
+    sent_message_id: str | None = None
+    warning: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sent": self.sent,
+            "saved_to_sent": self.saved_to_sent,
+            "sent_folder_id": self.sent_folder_id,
+            "sent_message_id": self.sent_message_id,
+            "warning": self.warning,
+        }
+
+
+@dataclass(frozen=True)
+class SavedDraft:
+    """Borrador guardado en la carpeta de borradores (sin enviar).
+
+    ``message_id`` es el UID asignado por el servidor, cuando lo informa.
+    """
+
+    folder_id: str
+    message_id: str | None = None
+    sent: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "folder_id": self.folder_id,
+            "message_id": self.message_id,
+            "sent": self.sent,
+        }

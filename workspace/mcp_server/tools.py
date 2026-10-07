@@ -28,7 +28,11 @@ SUPPORTED_SCOPES = [READ_SCOPE, WRITE_SCOPE, DELETE_SCOPE]
 INSTRUCTIONS = (
     "Gestiona cuentas de correo configuradas por el administrador: carpetas, mensajes, "
     "envío y adjuntos. No permite crear cuentas, cambiar credenciales ni administrar "
-    "proveedores — eso es responsabilidad exclusiva del administrador del sistema."
+    "proveedores — eso es responsabilidad exclusiva del administrador del sistema. "
+    "send_message, reply_message y forward_message ENVÍAN de inmediato (y guardan copia "
+    "en Enviados). Para preparar un correo o una respuesta SIN enviarla, usar save_draft "
+    "o save_reply_draft: quedan en la carpeta de Borradores para que una persona los "
+    "revise y envíe."
 )
 
 
@@ -213,13 +217,16 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
         bcc: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Envía un mensaje de correo.
+        """ENVÍA un mensaje de correo de inmediato y guarda una copia en Enviados.
+
+        Si el usuario pide dejarlo en borrador, NO usar esta herramienta: usar
+        save_draft.
 
         `to`/`cc`/`bcc`: listas de {"email": str, "name": str|null}.
         `attachments`: listas de {"filename": str, "data": bytes|str, "content_type": str|null}.
         """
         try:
-            _get_service().send(
+            result = _get_service().send(
                 alias,
                 to=to,
                 subject=subject,
@@ -229,7 +236,7 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
                 bcc=bcc,
                 attachments=attachments,
             )
-            return _ok(None)
+            return _ok(result)
         except MailCoreError as exc:
             return _err(exc)
 
@@ -243,13 +250,42 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
         reply_all: bool = False,
         include_original: bool = True,
     ) -> dict[str, Any]:
-        """Responde a un mensaje existente."""
+        """ENVÍA de inmediato una respuesta a un mensaje existente y guarda una
+        copia en Enviados.
+
+        Si el usuario pide preparar/redactar la respuesta o dejarla en
+        borrador, NO usar esta herramienta: usar save_reply_draft.
+        """
         try:
-            _get_service().reply(
+            result = _get_service().reply(
                 alias, folder_id, message_id, body_text,
                 reply_all=reply_all, include_original=include_original,
             )
-            return _ok(None)
+            return _ok(result)
+        except MailCoreError as exc:
+            return _err(exc)
+
+    @mcp.tool
+    @scoped(WRITE_SCOPE)
+    def save_reply_draft(
+        alias: str,
+        folder_id: str,
+        message_id: str,
+        body_text: str,
+        reply_all: bool = False,
+        include_original: bool = True,
+    ) -> dict[str, Any]:
+        """Prepara una respuesta a un mensaje existente y la guarda en la
+        carpeta de Borradores SIN ENVIARLA (destinatarios, asunto "Re:" y
+        encadenamiento con el original se arman solos).
+
+        Devuelve la carpeta de borradores y el UID del borrador.
+        """
+        try:
+            return _ok(_get_service().save_reply_draft(
+                alias, folder_id, message_id, body_text,
+                reply_all=reply_all, include_original=include_original,
+            ))
         except MailCoreError as exc:
             return _err(exc)
 
@@ -258,10 +294,10 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
     def forward_message(
         alias: str, folder_id: str, message_id: str, recipients: list[str], body_text: str
     ) -> dict[str, Any]:
-        """Reenvía un mensaje a uno o más destinatarios (direcciones de email)."""
+        """ENVÍA de inmediato el reenvío de un mensaje a uno o más destinatarios
+        (direcciones de email) y guarda una copia en Enviados."""
         try:
-            _get_service().forward(alias, folder_id, message_id, recipients, body_text)
-            return _ok(None)
+            return _ok(_get_service().forward(alias, folder_id, message_id, recipients, body_text))
         except MailCoreError as exc:
             return _err(exc)
 
@@ -277,8 +313,7 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
         cual, no para reenvío conversacional con comentario propio.
         """
         try:
-            _get_service().forward_raw(alias, folder_id, message_id, recipients)
-            return _ok(None)
+            return _ok(_get_service().forward_raw(alias, folder_id, message_id, recipients))
         except MailCoreError as exc:
             return _err(exc)
 
@@ -291,18 +326,29 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
         body_text: str = "",
         cc: list[dict[str, Any]] | None = None,
         bcc: list[dict[str, Any]] | None = None,
+        body_html: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Guarda un borrador en la cuenta."""
+        """Guarda un mensaje nuevo en la carpeta de Borradores SIN ENVIARLO.
+
+        Para preparar la respuesta a un mensaje existente, usar
+        save_reply_draft. Devuelve la carpeta de borradores y el UID del
+        borrador.
+
+        `recipients`/`cc`/`bcc`: listas de {"email": str, "name": str|null}.
+        `attachments`: listas de {"filename": str, "data": bytes|str, "content_type": str|null}.
+        """
         try:
-            _get_service().save_draft(
+            return _ok(_get_service().save_draft(
                 alias,
                 recipients=recipients,
                 subject=subject,
                 body_text=body_text or None,
+                body_html=body_html,
                 cc=cc,
                 bcc=bcc,
-            )
-            return _ok(None)
+                attachments=attachments,
+            ))
         except MailCoreError as exc:
             return _err(exc)
 

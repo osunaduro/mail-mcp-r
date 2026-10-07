@@ -16,6 +16,8 @@ from mail_core.domain import (
     Folder,
     Message,
     Recipient,
+    SavedDraft,
+    SendResult,
 )
 
 
@@ -67,7 +69,7 @@ class Provider(ABC):
     def mark_flagged(self, folder_id: str, message_id: str, flagged: bool) -> None: ...
 
     @abstractmethod
-    def send(self, draft: Draft) -> None: ...
+    def send(self, draft: Draft) -> SendResult: ...
 
     @abstractmethod
     def reply(
@@ -77,7 +79,18 @@ class Provider(ABC):
         body_text: str,
         reply_all: bool = False,
         include_original: bool = True,
-    ) -> None: ...
+    ) -> SendResult: ...
+
+    @abstractmethod
+    def save_reply_draft(
+        self,
+        folder_id: str,
+        message_id: str,
+        body_text: str,
+        reply_all: bool = False,
+        include_original: bool = True,
+    ) -> SavedDraft:
+        """Arma la respuesta y la guarda en borradores, sin enviarla."""
 
     @abstractmethod
     def forward(
@@ -86,7 +99,7 @@ class Provider(ABC):
         message_id: str,
         recipients: list[Recipient],
         body_text: str,
-    ) -> None: ...
+    ) -> SendResult: ...
 
     @abstractmethod
     def forward_raw(
@@ -94,10 +107,11 @@ class Provider(ABC):
         folder_id: str,
         message_id: str,
         recipients: list[Recipient],
-    ) -> None: ...
+    ) -> SendResult: ...
 
     @abstractmethod
-    def save_draft(self, draft: Draft) -> None: ...
+    def save_draft(self, draft: Draft) -> SavedDraft:
+        """Guarda el borrador en la carpeta de borradores, sin enviarlo."""
 
     @abstractmethod
     def list_attachments(self, folder_id: str, message_id: str) -> list[Attachment]: ...

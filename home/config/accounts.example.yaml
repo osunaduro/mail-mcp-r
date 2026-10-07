@@ -16,3 +16,10 @@ accounts:
       smtp_ssl: true
       username: "tu_correo@example.com"
       password: "TU_CONTRASEÑA_O_APP_PASSWORD"
+      # Opcionales — carpetas especiales. Si se omiten se detectan solas
+      # (SPECIAL-USE o nombres habituales como Drafts/Borradores, Sent/Enviados).
+      # drafts_folder: "Drafts"
+      # sent_folder: "Sent"
+      # Guardar copia en Enviados después de cada envío. Por defecto true,
+      # salvo Gmail y Office 365/Outlook, que ya la guardan solos.
+      # save_sent: true

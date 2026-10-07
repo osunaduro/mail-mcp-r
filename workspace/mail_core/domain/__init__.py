@@ -7,6 +7,8 @@ from mail_core.domain.entities import (
     Folder,
     Message,
     Recipient,
+    SavedDraft,
+    SendResult,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     "Folder",
     "Message",
     "Recipient",
+    "SavedDraft",
+    "SendResult",
 ]

@@ -280,6 +280,25 @@ async def save_draft(request: Request) -> JSONResponse:
             body_html=body.get("body_html"),
             cc=body.get("cc"),
             bcc=body.get("bcc"),
+            attachments=body.get("attachments"),
+        )
+    )
+
+
+async def save_reply_draft(request: Request) -> JSONResponse:
+    """Arma la respuesta y la deja en Borradores, sin enviarla."""
+    alias, folder_id, message_id = (
+        request.path_params["alias"], request.path_params["folder_id"], request.path_params["message_id"]
+    )
+    body = await _body(request)
+    return await _call(
+        lambda: get_service().save_reply_draft(
+            alias,
+            folder_id,
+            message_id,
+            body["body_text"],
+            reply_all=body.get("reply_all", False),
+            include_original=body.get("include_original", True),
         )
     )
 
@@ -373,6 +392,11 @@ routes = [
     Route(
         "/accounts/{alias}/folders/{folder_id}/messages/{message_id}/reply",
         reply_message,
+        methods=["POST"],
+    ),
+    Route(
+        "/accounts/{alias}/folders/{folder_id}/messages/{message_id}/reply-draft",
+        save_reply_draft,
         methods=["POST"],
     ),
     Route(

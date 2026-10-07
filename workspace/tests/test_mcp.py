@@ -22,6 +22,7 @@ EXPECTED_TOOLS = {
     "forward_message",
     "forward_message_raw",
     "save_draft",
+    "save_reply_draft",
     "list_attachments",
     "download_attachment",
 }
