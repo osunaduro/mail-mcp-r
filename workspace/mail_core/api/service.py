@@ -7,6 +7,8 @@ según la cuenta seleccionada por su alias.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from pathlib import Path
 from typing import Any
 
@@ -255,9 +257,19 @@ def _as_recipient(value: dict[str, Any]) -> Recipient:
 
 def _attachment_datum(value: dict[str, Any]) -> tuple[str, bytes, str | None]:
     filename = value["filename"]
-    data = value.get("data") or b""
-    if isinstance(data, str):
-        data = data.encode("utf-8")
+    data_base64 = value.get("data_base64")
+    if data_base64 is not None:
+        # Contenido binario (ej. un PDF) serializado como base64 estándar.
+        try:
+            data = base64.b64decode(data_base64, validate=True)
+        except (binascii.Error, ValueError, TypeError) as exc:
+            raise ValueError(
+                f"Adjunto '{filename}': 'data_base64' no es base64 válido"
+            ) from exc
+    else:
+        data = value.get("data") or b""
+        if isinstance(data, str):
+            data = data.encode("utf-8")
     content_type = value.get("content_type")
     return (filename, data, content_type)
 

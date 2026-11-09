@@ -333,6 +333,45 @@ def test_send_message(client, fake):
     assert kwargs["body_text"] == "Cuerpo"
 
 
+def test_send_message_adjunto_data_base64_llega_como_bytes(client, monkeypatch):
+    import base64
+
+    from mail_core.api.service import _build_draft
+
+    pdf = b"%PDF-1.4\xff\xfe"
+    capturado = {}
+
+    class _Service:
+        def send(self, alias, *, to, subject="", body_text=None, body_html=None,
+                 cc=None, bcc=None, attachments=None):
+            capturado["draft"] = _build_draft(to, cc, bcc, subject, body_text, body_html, attachments)
+
+    monkeypatch.setattr(rest_api, "get_service", lambda: _Service())
+    body = {
+        "to": [{"email": "a@example.com"}],
+        "attachments": [{"filename": "a.pdf", "data_base64": base64.b64encode(pdf).decode(),
+                         "content_type": "application/pdf"}],
+    }
+    r = client.post("/accounts/work/messages/send", headers=AUTH, json=body)
+    assert r.status_code == 200
+    assert capturado["draft"].attachments == [("a.pdf", pdf, "application/pdf")]
+
+
+def test_send_message_data_base64_invalido_da_400(client, monkeypatch):
+    from mail_core.api.service import _build_draft
+
+    class _Service:
+        def send(self, alias, *, to, attachments=None, **kw):
+            _build_draft(to, None, None, "", None, None, attachments)
+
+    monkeypatch.setattr(rest_api, "get_service", lambda: _Service())
+    body = {"to": [{"email": "a@example.com"}],
+            "attachments": [{"filename": "a.pdf", "data_base64": "###"}]}
+    r = client.post("/accounts/work/messages/send", headers=AUTH, json=body)
+    assert r.status_code == 400
+    assert "data_base64" in r.json()["error"]
+
+
 def test_reply_message(client, fake):
     body = {"body_text": "Respuesta", "reply_all": True}
     r = client.post(
