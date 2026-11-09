@@ -85,6 +85,7 @@ propio, independiente de `MEKA_API_KEY`/OIDC del MCP (ver
 Diferencias deliberadas respecto al contrato MCP:
 
 - Errores como status HTTP + `{"error": "..."}` (404 cuenta/carpeta/mensaje/adjunto no encontrado, 502 fallas del proveedor de correo, 500 error de configuración o interno, 400 el resto), en vez del envelope `{"ok": ..., "result": ...}` del MCP.
+- Adjuntos en `send` y `drafts` (`attachments`): lista de `{filename, data_base64, content_type?}`. `data_base64` es base64 estándar (se decodifica con validación estricta; si es inválido responde 400 `{"error": "Bad request: ..."}`) y sirve para binarios como PDFs. `{filename, data}` con `data` como texto (UTF-8) sigue funcionando. `filename` es obligatorio; `content_type` es opcional.
 - `GET .../attachments/{attachment_id}` devuelve el **binario crudo** del adjunto (`Content-Type` real + `Content-Disposition: attachment`), no JSON+base64 — más idiomático para un consumidor HTTP que va a guardar el archivo directo.
 
 ## Uso local con STDIO

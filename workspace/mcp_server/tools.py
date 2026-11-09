@@ -223,7 +223,7 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
         save_draft.
 
         `to`/`cc`/`bcc`: listas de {"email": str, "name": str|null}.
-        `attachments`: listas de {"filename": str, "data": bytes|str, "content_type": str|null}.
+        `attachments`: listas de {"filename": str, "data": bytes|str, "data_base64": str, "content_type": str|null}.
         """
         try:
             result = _get_service().send(
@@ -336,7 +336,7 @@ def register_tools(mcp: FastMCP, *, scope_guard: Callable[[str], Callable] | Non
         borrador.
 
         `recipients`/`cc`/`bcc`: listas de {"email": str, "name": str|null}.
-        `attachments`: listas de {"filename": str, "data": bytes|str, "content_type": str|null}.
+        `attachments`: listas de {"filename": str, "data": bytes|str, "data_base64": str, "content_type": str|null}.
         """
         try:
             return _ok(_get_service().save_draft(
